@@ -24,7 +24,8 @@ const ENABLE_THINKING_MODE = true; // Set to true to enable chat_template_kwargs
 const MODEL_MAPPING = {
   'deepseek-V3.2': 'deepseek-ai/deepseek-v3.2',
   'deepseek-V3.1': 'deepseek-ai/deepseek-v3.1',
-  'glm5': 'z-ai/glm5'
+  'glm5': 'z-ai/glm5',
+  'glm4.7': 'z-ai/glm4.7'
 };
 
 // Health check endpoint
