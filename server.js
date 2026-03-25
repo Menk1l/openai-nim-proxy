@@ -70,20 +70,19 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-        // Custom kwargs attached to root for reasoning models
+    // Custom kwargs attached to root for reasoning models
     if (ENABLE_THINKING_MODE) {
       if (nimModel.includes('glm')) {
-        // GLM models require specific thinking kwargs
+        // GLM models natively format their thoughts but require specific kwargs
         nimRequest.chat_template_kwargs = { 
           enable_thinking: true, 
-          clear_thinking: true 
+          clear_thinking: false // MUST be false so GLM outputs native thoughts
         };
       } else {
         // Default kwargs for DeepSeek/Qwen
         nimRequest.chat_template_kwargs = { thinking: true }; 
       }
     }
-
     
     // Make request using the high-speed axiosInstance
     const response = await axiosInstance.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
@@ -109,41 +108,56 @@ app.post('/v1/chat/completions', async (req, res) => {
           if (line.startsWith('data: ') && !line.includes('[DONE]')) {
             try {
               const data = JSON.parse(line.slice(6));
+              
               if (data.choices?.[0]?.delta) {
-                const reasoning = data.choices[0].delta.reasoning_content;
-                const content = data.choices[0].delta.content;
-                
-                                if (SHOW_REASONING) {
-                  let combinedContent = '';
-                  
-                  // 1. Handle Reasoning
-                  if (reasoning) {
-                    if (!reasoningStarted) {
-                      combinedContent += '<think>\n';
-                      reasoningStarted = true;
-                    }
-                    combinedContent += reasoning;
+                const delta = data.choices[0].delta;
+                const reasoning = delta.reasoning_content;
+                const content = delta.content;
+                const isGLM = nimModel.includes('glm');
+
+                if (isGLM) {
+                  // 🚀 GLM FIX: GLM natively formats its own <think> tags.
+                  // We bypass the buggy reasoning_content stream entirely.
+                  if (content !== undefined && content !== null) {
+                    delta.content = content;
+                  } else {
+                    delta.content = ""; 
                   }
+                  delete delta.reasoning_content;
                   
-                  // 2. Handle Transition and Content safely
-                  // typeof check prevents bugs where content is "" (which evaluates to false)
-                  if (typeof content === 'string') {
-                    if (reasoningStarted && content !== '') {
-                      combinedContent += '\n</think>\n\n';
-                      reasoningStarted = false;
+                } else {
+                  // 🚀 DEEPSEEK/QWEN FIX: Clean separation of reasoning.
+                  // We manually stitch the <think> tags together.
+                  if (SHOW_REASONING) {
+                    let combinedContent = '';
+                    
+                    if (reasoning) {
+                      if (!reasoningStarted) {
+                        combinedContent += '<think>\n';
+                        reasoningStarted = true;
+                      }
+                      combinedContent += reasoning;
                     }
-                    combinedContent += content;
-                  }
-                  
-                  // 3. Reassign back to the payload
-                  if (combinedContent !== '' || typeof content === 'string') {
-                    data.choices[0].delta.content = combinedContent || content;
-                    delete data.choices[0].delta.reasoning_content;
+                    
+                    if (content !== undefined && content !== null) {
+                      if (reasoningStarted && content !== '') {
+                        combinedContent += '\n</think>\n\n';
+                        reasoningStarted = false;
+                      }
+                      combinedContent += content;
+                    }
+                    
+                    if (combinedContent !== '' || typeof content === 'string') {
+                      delta.content = combinedContent || content || "";
+                      delete delta.reasoning_content;
+                    }
                   }
                 }
               }
               res.write(`data: ${JSON.stringify(data)}\n\n`);
-            } catch (e) {}
+            } catch (e) {
+              // Ignore partial JSON parse errors during stream
+            }
           } else if (line.includes('[DONE]')) {
             res.write(line + '\n');
           }
