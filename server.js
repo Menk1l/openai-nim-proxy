@@ -76,7 +76,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         // GLM models require specific thinking kwargs
         nimRequest.chat_template_kwargs = { 
           enable_thinking: true, 
-          clear_thinking: false 
+          clear_thinking: true 
         };
       } else {
         // Default kwargs for DeepSeek/Qwen
@@ -113,24 +113,31 @@ app.post('/v1/chat/completions', async (req, res) => {
                 const reasoning = data.choices[0].delta.reasoning_content;
                 const content = data.choices[0].delta.content;
                 
-                if (SHOW_REASONING) {
+                                if (SHOW_REASONING) {
                   let combinedContent = '';
-                  if (reasoning && !reasoningStarted) {
-                    combinedContent = '<think>\n' + reasoning;
-                    reasoningStarted = true;
-                  } else if (reasoning) {
-                    combinedContent = reasoning;
+                  
+                  // 1. Handle Reasoning
+                  if (reasoning) {
+                    if (!reasoningStarted) {
+                      combinedContent += '<think>\n';
+                      reasoningStarted = true;
+                    }
+                    combinedContent += reasoning;
                   }
                   
-                  if (content && reasoningStarted) {
-                    combinedContent += '</think>\n\n' + content;
-                    reasoningStarted = false;
-                  } else if (content) {
+                  // 2. Handle Transition and Content safely
+                  // typeof check prevents bugs where content is "" (which evaluates to false)
+                  if (typeof content === 'string') {
+                    if (reasoningStarted && content !== '') {
+                      combinedContent += '\n</think>\n\n';
+                      reasoningStarted = false;
+                    }
                     combinedContent += content;
                   }
                   
-                  if (combinedContent) {
-                    data.choices[0].delta.content = combinedContent;
+                  // 3. Reassign back to the payload
+                  if (combinedContent !== '' || typeof content === 'string') {
+                    data.choices[0].delta.content = combinedContent || content;
                     delete data.choices[0].delta.reasoning_content;
                   }
                 }
