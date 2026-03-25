@@ -55,10 +55,17 @@ app.get('/v1/models', (req, res) => {
   });
 });
 
-// Chat completions endpoint (main proxy)
-app.post('/v1/chat/completions', async (req, res) => {
-  try {
-    const { model, messages, temperature, max_tokens, stream } = req.body;
+    // 🔥 SCRUB OLD THINK TAGS FROM HISTORY TO SAVE TOKENS
+    const cleanedMessages = messages.map(msg => {
+      // Only check messages sent by the AI character
+      if (msg.role === 'assistant' && typeof msg.content === 'string') {
+        // Find <think>...</think> and any trailing newlines, and replace with empty string
+        const cleanContent = msg.content.replace(/<think>[\s\S]*?<\/think>\s*/g, '');
+        return { ...msg, content: cleanContent };
+      }
+      return msg;
+    });
+
     
     // Smart model selection with fallback
     let nimModel = MODEL_MAPPING[model];
