@@ -214,12 +214,24 @@ app.post('/v1/chat/completions', async (req, res) => {
       res.json(openaiResponse);
     }
     
-  } catch (error) {
-    console.error('Proxy error:', error.message);
+    } catch (error) {
+    console.error('\n=== 🚨 PROXY ERROR CAUGHT 🚨 ===');
+    console.error('Status Code:', error.response?.status || 500);
+    console.error('Basic Message:', error.message);
+    
+    // 🔥 This is the magic block that pulls the exact error details from NVIDIA NIM
+    if (error.response && error.response.data) {
+      console.error('\n🔍 EXACT NVIDIA API ERROR:');
+      console.error(JSON.stringify(error.response.data, null, 2));
+    }
+    console.error('================================\n');
+    
+    // Send the detailed error back to JanitorAI so you can see it on screen too
+    const detailedMessage = error.response?.data?.message || error.response?.data?.detail || error.message || 'Internal server error';
     
     res.status(error.response?.status || 500).json({
       error: {
-        message: error.message || 'Internal server error',
+        message: detailedMessage,
         type: 'invalid_request_error',
         code: error.response?.status || 500
       }
