@@ -17,10 +17,6 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// 🔥 Security Key (Stops random people from using your proxy)
-// Put this exact password in JanitorAI's "Reverse Proxy Key" box!
-const PROXY_API_KEY = process.env.PROXY_API_KEY || 'janitor-default-key';
-
 const SHOW_REASONING = true;
 const ENABLE_THINKING_MODE = true;
 
@@ -38,7 +34,7 @@ const MODEL_MAPPING = {
 };
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'Clean NIM Proxy', security: 'Enabled' });
+  res.json({ status: 'ok', service: 'Clean NIM Proxy (No Auth Required)' });
 });
 
 app.get('/v1/models', (req, res) => {
@@ -46,16 +42,6 @@ app.get('/v1/models', (req, res) => {
     object: 'list',
     data: Object.keys(MODEL_MAPPING).map(m => ({ id: m, object: 'model', created: Date.now(), owned_by: 'nvidia-nim-proxy' }))
   });
-});
-
-// 🔥 Security Check - Rejects requests without your custom Proxy Password
-app.use('/v1/chat/completions', (req, res, next) => {
-  const authHeader = req.headers.authorization || '';
-  if (authHeader !== `Bearer ${PROXY_API_KEY}`) {
-    console.error('🚨 Security Alert: Blocked unauthorized request. Wrong API Key.');
-    return res.status(401).json({ error: { message: 'Unauthorized: Invalid Proxy API Key' } });
-  }
-  next();
 });
 
 // MAIN COMPLETIONS ENDPOINT
