@@ -70,10 +70,20 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-    // Custom kwargs attached to root for reasoning models
+        // Custom kwargs attached to root for reasoning models
     if (ENABLE_THINKING_MODE) {
-      nimRequest.chat_template_kwargs = { thinking: true };
+      if (nimModel.includes('glm')) {
+        // GLM models require specific thinking kwargs
+        nimRequest.chat_template_kwargs = { 
+          enable_thinking: true, 
+          clear_thinking: false 
+        };
+      } else {
+        // Default kwargs for DeepSeek/Qwen
+        nimRequest.chat_template_kwargs = { thinking: true }; 
+      }
     }
+
     
     // Make request using the high-speed axiosInstance
     const response = await axiosInstance.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
