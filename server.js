@@ -6,11 +6,10 @@ const axios = require('axios');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Middleware (🔥 Increased to 50mb to prevent Payload Too Large errors)
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-
 
 // NVIDIA NIM API configuration
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
@@ -55,8 +54,13 @@ app.get('/v1/models', (req, res) => {
   });
 });
 
+// Chat completions endpoint (main proxy) - 🔥 ASYNC PROPERLY DECLARED
+app.post('/v1/chat/completions', async (req, res) => {
+  try {
+    const { model, messages, temperature, max_tokens, stream } = req.body;
+    
     // 🔥 SCRUB OLD THINK TAGS FROM HISTORY TO SAVE TOKENS
-    const cleanedMessages = messages.map(msg => {
+    const cleanedMessages = (messages || []).map(msg => {
       // Only check messages sent by the AI character
       if (msg.role === 'assistant' && typeof msg.content === 'string') {
         // Find <think>...</think> and any trailing newlines, and replace with empty string
@@ -66,7 +70,6 @@ app.get('/v1/models', (req, res) => {
       return msg;
     });
 
-    
     // Smart model selection with fallback
     let nimModel = MODEL_MAPPING[model];
     if (!nimModel) {
@@ -100,23 +103,22 @@ app.get('/v1/models', (req, res) => {
     // Transform OpenAI request to NIM format
     const nimRequest = {
       model: nimModel,
-      messages: messages,
+      messages: cleanedMessages, // 🔥 NOW USING THE SCRUBBED MESSAGES TO SAVE CONTEXT!
       temperature: temperature || 0.6,
       max_tokens: max_tokens || 9024,
       extra_body: ENABLE_THINKING_MODE ? { chat_template_kwargs: { thinking: true } } : undefined,
       stream: stream || false
     };
     
-        // Make request to NVIDIA NIM API
+    // Make request to NVIDIA NIM API
     const response = await axios.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
       headers: {
         'Authorization': `Bearer ${NIM_API_KEY}`,
         'Content-Type': 'application/json'
       },
       responseType: stream ? 'stream' : 'json',
-      timeout: 180000 // ⏳ Waits up to 3 minutes for the model to think and respond
+      timeout: 180000 // 🔥 WAITS UP TO 3 MINUTES FOR THE MODEL TO THINK
     });
-
     
     if (stream) {
       // Handle streaming response with reasoning
@@ -221,19 +223,18 @@ app.get('/v1/models', (req, res) => {
       res.json(openaiResponse);
     }
     
-    } catch (error) {
+  } catch (error) {
+    // 🔥 DETAILED ERROR LOGGING
     console.error('\n=== 🚨 PROXY ERROR CAUGHT 🚨 ===');
     console.error('Status Code:', error.response?.status || 500);
     console.error('Basic Message:', error.message);
     
-    // 🔥 This is the magic block that pulls the exact error details from NVIDIA NIM
     if (error.response && error.response.data) {
       console.error('\n🔍 EXACT NVIDIA API ERROR:');
       console.error(JSON.stringify(error.response.data, null, 2));
     }
     console.error('================================\n');
     
-    // Send the detailed error back to JanitorAI so you can see it on screen too
     const detailedMessage = error.response?.data?.message || error.response?.data?.detail || error.message || 'Internal server error';
     
     res.status(error.response?.status || 500).json({
@@ -263,3 +264,4 @@ app.listen(PORT, () => {
   console.log(`Reasoning display: ${SHOW_REASONING ? 'ENABLED' : 'DISABLED'}`);
   console.log(`Thinking mode: ${ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED'}`);
 });
+
