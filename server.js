@@ -17,8 +17,8 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-const SHOW_REASONING = false;
-const ENABLE_THINKING_MODE = false;
+const SHOW_REASONING = true;
+const ENABLE_THINKING_MODE = true;
 
 // 3. SPEED UPGRADE: Connection Pooling (Keeps connection to NVIDIA open for faster replies)
 const axiosInstance = axios.create({
