@@ -27,8 +27,8 @@ const axiosInstance = axios.create({
 });
 
 const MODEL_MAPPING = {
-  'deepseek-V3.2': 'deepseek-ai/deepseek-v3.2',
-  'deepseek-V3.1': 'deepseek-ai/deepseek-v3.1',
+  'deepseek-flash': 'deepseek-ai/deepseek-v4-flash',
+  'deepseek-pro': 'deepseek-ai/deepseek-v4-pro',
   'glm5': 'z-ai/glm5',
   'glm4.7': 'z-ai/glm4.7', 
   'qwen3.5-120': 'qwen/qwen3.5-122b-a10b',
