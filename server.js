@@ -32,7 +32,8 @@ const MODEL_MAPPING = {
   'glm5': 'z-ai/glm5',
   'glm4.7': 'z-ai/glm4.7', 
   'qwen3.5-120': 'qwen/qwen3.5-122b-a10b',
-  'qwen3.5-300': 'qwen/qwen3.5-397b-a17b' 
+  'qwen3.5-300': 'qwen/qwen3.5-397b-a17b',
+  'moonshot': 'moonshotai/kimi-k2.6' 
 };
 
 app.get('/health', (req, res) => {
