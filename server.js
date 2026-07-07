@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy
+// server.js - OpenAI to NVIDIA NIM API Proxy with Auto-Retry
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -20,7 +20,11 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 const SHOW_REASONING = true;
 const ENABLE_THINKING_MODE = true;
 
-// 3. SPEED UPGRADE: Connection Pooling (Keeps connection to NVIDIA open for faster replies)
+// 🚀 FAULT TOLERANCE TUNING
+const MAX_RETRIES = 4;            // Max attempts to push past NVIDIA's congestion
+const INITIAL_RETRY_DELAY = 1500; // Starting pause in milliseconds (1.5 seconds)
+
+// 3. SPEED UPGRADE: Connection Pooling (Ke Keeps connection to NVIDIA open for faster replies)
 const axiosInstance = axios.create({
   httpAgent: new http.Agent({ keepAlive: true }),
   httpsAgent: new https.Agent({ keepAlive: true }),
@@ -35,6 +39,9 @@ const MODEL_MAPPING = {
   'qwen3.5-300': 'qwen/qwen3.5-397b-a17b',
   'moonshot': 'moonshotai/kimi-k2.6' 
 };
+
+// Helper utility for backoff delays
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'Clean NIM Proxy (No Auth Required)' });
@@ -74,23 +81,45 @@ app.post('/v1/chat/completions', async (req, res) => {
     // Custom kwargs attached to root for reasoning models
     if (ENABLE_THINKING_MODE) {
       if (nimModel.includes('glm')) {
-        // GLM models natively format their thoughts but require specific kwargs
         nimRequest.chat_template_kwargs = { 
           enable_thinking: true, 
           clear_thinking: false // MUST be false so GLM outputs native thoughts
         };
       } else {
-        // Default kwargs for DeepSeek/Qwen
         nimRequest.chat_template_kwargs = { thinking: true }; 
       }
     }
     
-    // Make request using the high-speed axiosInstance
-    const response = await axiosInstance.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-      headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
-      responseType: stream ? 'stream' : 'json',
-      timeout: 180000 // 3 minute wait
-    });
+    // --- 🛡️ AUTOMATED RETRY LOOP FOR RESILIENCE ---
+    let response;
+    let currentDelay = INITIAL_RETRY_DELAY;
+    
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        response = await axiosInstance.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
+          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
+          responseType: stream ? 'stream' : 'json',
+          timeout: 180000 // 3 minute wait
+        });
+        break; // If successful, smash out of the loop!
+      } catch (error) {
+        const errorData = error.response?.data;
+        // Parse out any nested error strings from Nvidia
+        const errorMsg = typeof errorData === 'string' ? errorData : (errorData?.error?.message || error.message || '');
+        const isResourceExhausted = errorMsg.includes('ResourceExhausted') || errorMsg.includes('limit reached');
+        const is500Series = error.response?.status >= 500;
+
+        // If it's a server limit issue and we have remaining attempts, back off and try again
+        if ((isResourceExhausted || is500Series) && attempt < MAX_RETRIES) {
+          console.warn(`⚠️ [Attempt ${attempt}/${MAX_RETRIES}] NVIDIA NIM is throttled (${error.response?.status || 500}). Retrying in ${currentDelay}ms...`);
+          await sleep(currentDelay);
+          currentDelay *= 2; // Exponential backoff scaling (1.5s -> 3s -> 6s)
+        } else {
+          throw error; // Hand off to main catch block if it's a non-retryable error or all attempts failed
+        }
+      }
+    }
+    // ----------------------------------------------
     
     if (stream) {
       res.setHeader('Content-Type', 'text/event-stream');
@@ -117,8 +146,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                 const isGLM = nimModel.includes('glm');
 
                 if (isGLM) {
-                  // 🚀 GLM FIX: GLM natively formats its own <think> tags.
-                  // We bypass the buggy reasoning_content stream entirely.
                   if (content !== undefined && content !== null) {
                     delta.content = content;
                   } else {
@@ -127,8 +154,6 @@ app.post('/v1/chat/completions', async (req, res) => {
                   delete delta.reasoning_content;
                   
                 } else {
-                  // 🚀 DEEPSEEK/QWEN FIX: Clean separation of reasoning.
-                  // We manually stitch the <think> tags together.
                   if (SHOW_REASONING) {
                     let combinedContent = '';
                     
@@ -185,4 +210,3 @@ app.post('/v1/chat/completions', async (req, res) => {
 
 app.all('*', (req, res) => res.status(404).json({ error: { message: 'Not found' } }));
 app.listen(PORT, () => console.log(`🚀 Clean Proxy running on port ${PORT}`));
-
