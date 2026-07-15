@@ -1,4 +1,4 @@
-// server.js - OpenAI to NVIDIA NIM API Proxy with Auto-Retry
+// server.js - OpenAI to NVIDIA NIM API Proxy with Streaming Keep-Alive
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
@@ -20,11 +20,11 @@ const NIM_API_KEY = process.env.NIM_API_KEY;
 const SHOW_REASONING = true;
 const ENABLE_THINKING_MODE = true;
 
-// 🚀 FAULT TOLERANCE TUNING
-const MAX_RETRIES = 4;            // Max attempts to push past NVIDIA's congestion
-const INITIAL_RETRY_DELAY = 1500; // Starting pause in milliseconds (1.5 seconds)
+// FAULT TOLERANCE TUNING
+const MAX_RETRIES = 3;            
+const INITIAL_RETRY_DELAY = 1500; 
 
-// 3. SPEED UPGRADE: Connection Pooling (Ke Keeps connection to NVIDIA open for faster replies)
+// 3. SPEED UPGRADE: Connection Pooling
 const axiosInstance = axios.create({
   httpAgent: new http.Agent({ keepAlive: true }),
   httpsAgent: new https.Agent({ keepAlive: true }),
@@ -40,11 +40,10 @@ const MODEL_MAPPING = {
   'moonshot': 'moonshotai/kimi-k2.6' 
 };
 
-// Helper utility for backoff delays
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', service: 'Clean NIM Proxy (No Auth Required)' });
+  res.json({ status: 'ok', service: 'Clean NIM Proxy (Keep-Alive Maintained)' });
 });
 
 app.get('/v1/models', (req, res) => {
@@ -59,7 +58,6 @@ app.post('/v1/chat/completions', async (req, res) => {
   try {
     let { model, messages, temperature, max_tokens, stream } = req.body;
     
-    // 🔥 SCRUB OLD THINK TAGS TO SAVE TOKENS
     let cleanedMessages = (messages || []).map(msg => {
       if (msg.role === 'assistant' && typeof msg.content === 'string') {
         return { ...msg, content: msg.content.replace(/<think>[\s\S]*?<\/think>\s*/g, '') };
@@ -67,9 +65,8 @@ app.post('/v1/chat/completions', async (req, res) => {
       return msg;
     });
 
-    let nimModel = MODEL_MAPPING[model] || 'meta/llama-3.1-8b-instruct'; // Default fallback
+    let nimModel = MODEL_MAPPING[model] || 'meta/llama-3.1-8b-instruct'; 
     
-    // Transform request to NIM format
     const nimRequest = {
       model: nimModel,
       messages: cleanedMessages, 
@@ -78,135 +75,155 @@ app.post('/v1/chat/completions', async (req, res) => {
       stream: stream || false
     };
     
-    // Custom kwargs attached to root for reasoning models
     if (ENABLE_THINKING_MODE) {
       if (nimModel.includes('glm')) {
-        nimRequest.chat_template_kwargs = { 
-          enable_thinking: true, 
-          clear_thinking: false // MUST be false so GLM outputs native thoughts
-        };
+        nimRequest.chat_template_kwargs = { enable_thinking: true, clear_thinking: false };
       } else {
         nimRequest.chat_template_kwargs = { thinking: true }; 
       }
     }
     
-    // --- 🛡️ AUTOMATED RETRY LOOP FOR RESILIENCE ---
-    let response;
-    let currentDelay = INITIAL_RETRY_DELAY;
-    
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-      try {
-        response = await axiosInstance.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
-          headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
-          responseType: stream ? 'stream' : 'json',
-          timeout: 180000 // 3 minute wait
-        });
-        break; // If successful, smash out of the loop!
-      } catch (error) {
-        const errorData = error.response?.data;
-        // Parse out any nested error strings from Nvidia
-        const errorMsg = typeof errorData === 'string' ? errorData : (errorData?.error?.message || error.message || '');
-        const isResourceExhausted = errorMsg.includes('ResourceExhausted') || errorMsg.includes('limit reached');
-        const is500Series = error.response?.status >= 500;
-
-        // If it's a server limit issue and we have remaining attempts, back off and try again
-        if ((isResourceExhausted || is500Series) && attempt < MAX_RETRIES) {
-          console.warn(`⚠️ [Attempt ${attempt}/${MAX_RETRIES}] NVIDIA NIM is throttled (${error.response?.status || 500}). Retrying in ${currentDelay}ms...`);
-          await sleep(currentDelay);
-          currentDelay *= 2; // Exponential backoff scaling (1.5s -> 3s -> 6s)
-        } else {
-          throw error; // Hand off to main catch block if it's a non-retryable error or all attempts failed
-        }
-      }
-    }
-    // ----------------------------------------------
-    
     if (stream) {
+      // 🚀 1. IMMEDIATELY tell JanitorAI & Railway we are accepting the stream
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
-      
-      let buffer = '';
-      let reasoningStarted = false;
-      
-      response.data.on('data', (chunk) => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        
-        lines.forEach(line => {
-          if (line.startsWith('data: ') && !line.includes('[DONE]')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              
-              if (data.choices?.[0]?.delta) {
-                const delta = data.choices[0].delta;
-                const reasoning = delta.reasoning_content;
-                const content = delta.content;
-                const isGLM = nimModel.includes('glm');
+      if (res.flushHeaders) res.flushHeaders(); // Lock in the handshake instantly
 
-                if (isGLM) {
-                  if (content !== undefined && content !== null) {
-                    delta.content = content;
-                  } else {
-                    delta.content = ""; 
-                  }
-                  delete delta.reasoning_content;
-                  
-                } else {
-                  if (SHOW_REASONING) {
-                    let combinedContent = '';
-                    
-                    if (reasoning) {
-                      if (!reasoningStarted) {
-                        combinedContent += '<think>\n';
-                        reasoningStarted = true;
-                      }
-                      combinedContent += reasoning;
-                    }
-                    
+      // 🚀 2. Start an automated heartbeat interval (Sends an SSE comment every 15s to bypass all timeouts)
+      const heartbeat = setInterval(() => {
+        try {
+          res.write(': keepalive\n\n');
+        } catch (err) {
+          clearInterval(heartbeat);
+        }
+      }, 15000);
+
+      let response;
+      let currentDelay = INITIAL_RETRY_DELAY;
+      
+      try {
+        for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+          try {
+            response = await axiosInstance.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
+              headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
+              responseType: 'stream',
+              timeout: 600000 // 🚀 Extended to 10 Minutes to allow deep context compilation
+            });
+            break; 
+          } catch (error) {
+            const errorData = error.response?.data;
+            const errorMsg = typeof errorData === 'string' ? errorData : (errorData?.error?.message || error.message || '');
+            const isRetryable = errorMsg.includes('ResourceExhausted') || error.response?.status >= 500;
+
+            if (isRetryable && attempt < MAX_RETRIES) {
+              console.warn(`⚠️ Throttled. Retrying attempt ${attempt}...`);
+              await sleep(currentDelay);
+              currentDelay *= 2;
+            } else {
+              throw error;
+            }
+          }
+        }
+
+        // 🚀 3. Stop the heartbeat immediately when NVIDIA finally starts streaming real data
+        clearInterval(heartbeat);
+        
+        let buffer = '';
+        let reasoningStarted = false;
+        
+        response.data.on('data', (chunk) => {
+          buffer += chunk.toString();
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+          
+          lines.forEach(line => {
+            if (line.startsWith('data: ') && !line.includes('[DONE]')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                
+                if (data.choices?.[0]?.delta) {
+                  const delta = data.choices[0].delta;
+                  const reasoning = delta.reasoning_content;
+                  const content = delta.content;
+                  const isGLM = nimModel.includes('glm');
+
+                  if (isGLM) {
                     if (content !== undefined && content !== null) {
-                      if (reasoningStarted && content !== '') {
-                        combinedContent += '\n</think>\n\n';
-                        reasoningStarted = false;
-                      }
-                      combinedContent += content;
+                      delta.content = content;
+                    } else {
+                      delta.content = ""; 
                     }
-                    
-                    if (combinedContent !== '' || typeof content === 'string') {
-                      delta.content = combinedContent || content || "";
-                      delete delta.reasoning_content;
+                    delete delta.reasoning_content;
+                  } else {
+                    if (SHOW_REASONING) {
+                      let combinedContent = '';
+                      
+                      if (reasoning) {
+                        if (!reasoningStarted) {
+                          combinedContent += '<think>\n';
+                          reasoningStarted = true;
+                        }
+                        combinedContent += reasoning;
+                      }
+                      
+                      if (content !== undefined && content !== null) {
+                        if (reasoningStarted && content !== '') {
+                          combinedContent += '\n</think>\n\n';
+                          reasoningStarted = false;
+                        }
+                        combinedContent += content;
+                      }
+                      
+                      if (combinedContent !== '' || typeof content === 'string') {
+                        delta.content = combinedContent || content || "";
+                        delete delta.reasoning_content;
+                      }
                     }
                   }
                 }
+                res.write(`data: ${JSON.stringify(data)}\n\n`);
+              } catch (e) {
+                // Ignore parsing fragments
               }
-              res.write(`data: ${JSON.stringify(data)}\n\n`);
-            } catch (e) {
-              // Ignore partial JSON parse errors during stream
+            } else if (line.includes('[DONE]')) {
+              res.write(line + '\n');
             }
-          } else if (line.includes('[DONE]')) {
-            res.write(line + '\n');
-          }
+          });
         });
-      });
-      response.data.on('end', () => res.end());
+        response.data.on('end', () => res.end());
+
+      } catch (streamError) {
+        clearInterval(heartbeat);
+        console.error('🚨 Deepstream Handshake Failure:', streamError.message);
+        // Because headers are already sent, we stream the error format cleanly back to the UI
+        res.write(`data: ${JSON.stringify({ error: { message: `NVIDIA Pro processing timed out or failed: ${streamError.message}` } })}\n\n`);
+        res.end();
+      }
+
     } else {
+      // NON-STREAM FALLBACK (Maintained with an extended timeout)
+      const response = await axiosInstance.post(`${NIM_API_BASE}/chat/completions`, nimRequest, {
+        headers: { 'Authorization': `Bearer ${NIM_API_KEY}`, 'Content-Type': 'application/json' },
+        responseType: 'json',
+        timeout: 600000 
+      });
       res.json(response.data); 
     }
     
   } catch (error) {
-    // 🔥 DETAILED ERROR LOGGING
-    console.error('\n=== 🚨 PROXY ERROR CAUGHT 🚨 ===');
-    console.error('Status Code:', error.response?.status || 500);
+    console.error('\n=== 🚨 GLOBAL PROXY ERROR 🚨 ===');
+    console.error('Status:', error.response?.status || 500);
     console.error('Message:', error.message);
-    if (error.response?.data) console.error('Details:', JSON.stringify(error.response.data));
     console.error('================================\n');
     
-    res.status(error.response?.status || 500).json({
-      error: { message: error.response?.data?.detail || error.message || 'Server error' }
-    });
+    if (!res.headersSent) {
+      res.status(error.response?.status || 500).json({
+        error: { message: error.response?.data?.detail || error.message || 'Server error' }
+      });
+    }
   }
 });
 
 app.all('*', (req, res) => res.status(404).json({ error: { message: 'Not found' } }));
-app.listen(PORT, () => console.log(`🚀 Clean Proxy running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Resilient Proxy active on port ${PORT}`));
